@@ -33,6 +33,8 @@ jobs:
         env:
           DEBUG: "1"       # set to "0" after we’re satisfied
           ROW_TOL: "3.5"   # adjust if rows are splitting/merging oddly
+          COL_GUTTER_PX: "16"
+          COL_LEFT_BIAS_PX: "6"
         run: python app/build_calendar.py
 
       - uses: actions/upload-pages-artifact@v3
