@@ -41,6 +41,17 @@ jobs:
         with:
           path: public
 
+      - name: Sanity guard (basic)
+        run: |
+          set -euo pipefail
+          test -s public/ekac.ics || { echo "ERROR: ekac.ics missing or empty"; exit 1; }
+          grep -q '^BEGIN:VCALENDAR' public/ekac.ics || { echo "ERROR: Not an iCal"; exit 1; }
+          grep -q '^SUMMARY:Lap lanes' public/ekac.ics || { echo "ERROR: No lap-lane events"; exit 1; }
+          # Optional: require a minimum event count; adjust threshold if needed.
+          if [ "$(grep -c '^SUMMARY:Lap lanes' public/ekac.ics)" -lt 3 ]; then
+            echo "ERROR: Too few events (<3) — likely a parse failure"; exit 1;
+          fi
+
   deploy:
     needs: build
     runs-on: ubuntu-latest
