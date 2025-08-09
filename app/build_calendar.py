@@ -2,16 +2,19 @@
 """Build iCal feeds for EKAC Lap, Shallow, and Dive, with optional debug artifacts.
 
 - Finds the latest Pool Schedule PDF (Aquatics page; fallback to fixed ID).
-- Splits page into weekday columns (left-biased boundary to prevent bleed).
-- Clusters words into visual rows; assigns each row to the nearest section header above:
-  ["Lap Lanes", "Shallow Pool", "Dive Well"].
-- Extracts time ranges and, for Lap, the lane counts (to the RIGHT of the time).
+- Splits the page into weekday columns (left-biased boundary to prevent cross-column bleed).
+- Clusters text into visual rows; classifies each row into Lap / Shallow / Dive via:
+    1) page-level vertical bands inferred from any section headers found anywhere on the page,
+    2) falling back to per-column section markers above the row,
+    3) defaulting to Lap if neither is found.
+- Extracts time ranges; for Lap rows it also extracts lane counts (to the RIGHT of the time).
 - Writes four feeds:
     public/ekac-lap.ics
     public/ekac-shallow.ics
     public/ekac-dive.ics
-    public/ekac.ics  (combined)
-- Writes public/index.html (landing page). If DEBUG=1, also debug.html / debug.json.
+    public/ekac.ics   (combined)
+- Writes public/index.html (landing page with “About/Disclaimer”).
+- If DEBUG=1, also writes public/debug.html and public/debug.json.
 
 Env:
   DEBUG=1                 -> write debug artifacts
@@ -45,11 +48,13 @@ DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sun
 
 DEBUG = os.environ.get("DEBUG", "0") == "1"
 
+
 def _get_float_env(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, str(default)))
     except ValueError:
         return default
+
 
 ROW_TOL = _get_float_env("ROW_TOL", 3.5)
 COL_GUTTER_PX = _get_float_env("COL_GUTTER_PX", 16.0)
@@ -61,16 +66,24 @@ Kind = Literal["lap", "shallow", "dive"]
 @dataclass(frozen=True)
 class Block:
     start: datetime  # UTC
-    end: datetime    # UTC
+    end: datetime  # UTC
     kind: Kind
-    label: str       # "5", "4–5" for lap; "open" for shallow/dive
+    label: str  # "5", "4–5" for lap; "open" for shallow/dive
     source_url: str
     page: int
     day: str
     row_text: str
 
 
+SECTION_KEYS = {
+    "lap": ["lap lane", "lap lanes", "lap swim", "lap"],
+    "shallow": ["shallow pool", "shallow"],
+    "dive": ["dive well", "diving well", "dive"],
+}
+
+
 def discover_latest_pdf() -> str:
+    """Try to discover the latest Pool Schedule PDF; fall back to a stable ID."""
     try:
         resp = requests.get(AQUATICS_URL, timeout=30)
         resp.raise_for_status()
@@ -80,6 +93,7 @@ def discover_latest_pdf() -> str:
             text = (a.get_text() or "").lower()
             if ("/DocumentCenter/View/" in href) and ("pool" in text and "schedule" in text):
                 return requests.compat.urljoin(AQUATICS_URL, href)
+        # fallback to href-only match if the anchor text is missing
         for a in soup.find_all("a", href=True):
             href = a["href"]
             if "/DocumentCenter/View/" in href and "Pool" in href and "Schedule" in href:
@@ -90,6 +104,7 @@ def discover_latest_pdf() -> str:
 
 
 def month_span_to_dates(header: str, now_utc: datetime) -> Tuple[datetime, datetime] | None:
+    """Parse 'Pool Schedule for August 4-10' into (start_date, end_date) at midnight UTC."""
     m = re.search(r"Pool Schedule\s*(?:for)?\s+([A-Za-z]+)\s+(\d{1,2})\s*[-–]\s*(\d{1,2})", header)
     if not m:
         return None
@@ -107,13 +122,16 @@ def month_span_to_dates(header: str, now_utc: datetime) -> Tuple[datetime, datet
 
 
 def to_utc_local_eastern(local_date: datetime, hh: int, mm: int) -> datetime:
+    """Convert America/New_York local time to UTC (ICS stores UTC)."""
     from zoneinfo import ZoneInfo
+
     eastern = ZoneInfo("America/New_York")
     local_dt = datetime(local_date.year, local_date.month, local_date.day, hh, mm, tzinfo=eastern)
     return local_dt.astimezone(timezone.utc)
 
 
 def time_token_to_24h(tstr: str) -> tuple[int, int]:
+    """Accept '7a', '7 am', '7:15a', '7:15 pm', etc."""
     s = tstr.strip().lower().replace(" ", "")
     m = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?(a|p|am|pm)", s)
     if not m:
@@ -129,6 +147,7 @@ def time_token_to_24h(tstr: str) -> tuple[int, int]:
 
 
 def _rows_from_words(day_words: list[dict], tol: float = ROW_TOL) -> list[list[dict]]:
+    """Cluster tokens into visual rows by y ('top') with tolerance."""
     if not day_words:
         return []
     ws = sorted(day_words, key=lambda w: (w["top"], w["x0"]))
@@ -151,18 +170,28 @@ def _rows_from_words(day_words: list[dict], tol: float = ROW_TOL) -> list[list[d
 def group_by_day_columns(words: list[dict]) -> tuple[dict[str, list[dict]], dict]:
     """Assign tokens to weekday columns with a left-biased boundary gutter."""
     name_map = {
-        "monday": "Monday", "mon": "Monday",
-        "tuesday": "Tuesday", "tue": "Tuesday", "tues": "Tuesday",
-        "wednesday": "Wednesday", "wed": "Wednesday",
-        "thursday": "Thursday", "thu": "Thursday", "thur": "Thursday", "thurs": "Thursday",
-        "friday": "Friday", "fri": "Friday",
-        "saturday": "Saturday", "sat": "Saturday",
-        "sunday": "Sunday", "sun": "Sunday",
+        "monday": "Monday",
+        "mon": "Monday",
+        "tuesday": "Tuesday",
+        "tue": "Tuesday",
+        "tues": "Tuesday",
+        "wednesday": "Wednesday",
+        "wed": "Wednesday",
+        "thursday": "Thursday",
+        "thu": "Thursday",
+        "thur": "Thursday",
+        "thurs": "Thursday",
+        "friday": "Friday",
+        "fri": "Friday",
+        "saturday": "Saturday",
+        "sat": "Saturday",
+        "sunday": "Sunday",
+        "sun": "Sunday",
     }
 
     headers: list[tuple[str, float]] = []
     for w in words:
-        key = name_map.get(w["text"].strip().lower())
+        key = name_map.get((w.get("text") or "").strip().lower())
         if key:
             headers.append((key, (w["x0"] + w["x1"]) / 2.0))
 
@@ -175,12 +204,17 @@ def group_by_day_columns(words: list[dict]) -> tuple[dict[str, list[dict]], dict
 
     if len(best) >= 7:
         centers = [
-            ("Monday", best["Monday"]), ("Tuesday", best["Tuesday"]), ("Wednesday", best["Wednesday"]),
-            ("Thursday", best["Thursday"]), ("Friday", best["Friday"]), ("Saturday", best["Saturday"]),
+            ("Monday", best["Monday"]),
+            ("Tuesday", best["Tuesday"]),
+            ("Wednesday", best["Wednesday"]),
+            ("Thursday", best["Thursday"]),
+            ("Friday", best["Friday"]),
+            ("Saturday", best["Saturday"]),
             ("Sunday", best["Sunday"]),
         ]
         debug["mode"] = "headers"
     else:
+        # Fallback: approximate equal-width centers across page
         if not words:
             minx, maxx = 0.0, 1000.0
         else:
@@ -214,18 +248,11 @@ def group_by_day_columns(words: list[dict]) -> tuple[dict[str, list[dict]], dict
     return columns, debug
 
 
-SECTION_KEYS = {
-    "lap": ["lap lane", "lap lanes", "lap swim", "lap"],
-    "shallow": ["shallow pool", "shallow"],
-    "dive": ["dive well", "diving well", "dive"],
-}
-
-
-def _section_markers(words: list[dict]) -> list[tuple[float, Kind]]:
+def _section_markers(words: list[dict]) -> list[tuple[float, str]]:
     """Return [(y_top, kind)] for section headers within a single day column."""
-    markers: list[tuple[float, Kind]] = []
+    markers: list[tuple[float, str]] = []
     for w in words:
-        txt = w["text"].strip().lower()
+        txt = (w.get("text") or "").strip().lower()
         for kind, keys in SECTION_KEYS.items():
             if any(k in txt for k in keys):
                 markers.append((w["top"], kind))  # y position
@@ -234,22 +261,76 @@ def _section_markers(words: list[dict]) -> list[tuple[float, Kind]]:
     return markers
 
 
-def _assign_kind(row: list[dict], markers: list[tuple[float, Kind]], default: Kind = "lap") -> Kind:
-    """Assign kind by the nearest marker ABOVE the row; default if none found."""
-    if not markers or not row:
+def _page_section_bands(words: list[dict]) -> list[tuple[float, float, str]]:
+    """Return vertical bands [(y_top, y_bottom, kind)] for lap/shallow/dive across the page.
+
+    Strategy: find y-centers of any section header tokens anywhere on the page; sort by y and
+    convert to bands by midpoints. If <2 markers found, return [] (no page bands).
+    """
+    hits: list[tuple[float, str]] = []
+    for w in words:
+        t = (w.get("text") or "").strip().lower()
+        for kind, phrases in SECTION_KEYS.items():
+            if any(p in t for p in phrases):
+                ymid = (w["top"] + w.get("bottom", w["top"])) / 2.0
+                hits.append((ymid, kind))
+                break
+    if not hits:
+        return []
+
+    # take the median y per kind to reduce noise
+    from statistics import median
+
+    per_kind: dict[str, list[float]] = {}
+    for y, k in hits:
+        per_kind.setdefault(k, []).append(y)
+    centers = [(median(ys), k) for k, ys in per_kind.items()]
+    if len(centers) < 2:
+        return []
+
+    centers.sort(key=lambda x: x[0])  # by y
+    edges = [(centers[i][0] + centers[i + 1][0]) / 2.0 for i in range(len(centers) - 1)]
+
+    bands: list[tuple[float, float, str]] = []
+    for i, (y, kind) in enumerate(centers):
+        top = -1e9 if i == 0 else edges[i - 1]
+        bot = 1e9 if i == len(centers) - 1 else edges[i]
+        bands.append((top, bot, kind))
+    return bands
+
+
+def _assign_kind(
+    row: list[dict],
+    bands: list[tuple[float, float, str]] | None,
+    col_markers: list[tuple[float, str]] | None,
+    default: str = "lap",
+) -> str:
+    """Prefer page-level bands; fall back to column markers; else default."""
+    if not row:
         return default
     y = sum(w["top"] for w in row) / len(row)
-    above = [m for m in markers if m[0] <= y + 0.01]
-    if not above:
-        return default
-    return above[-1][1]
+
+    if bands:
+        for top, bot, kind in bands:
+            if top <= y <= bot:
+                return kind
+
+    if col_markers:
+        above = [m for m in col_markers if m[0] <= y + 0.01]
+        if above:
+            return above[-1][1]
+
+    return default
 
 
-def extract_blocks_for_day(day_words: list[dict], local_date: datetime) -> Iterable[Block]:
-    """Yield Blocks for the day, categorized by section; counts are right-side only for Lap."""
+def extract_blocks_for_day(
+    day_words: list[dict],
+    local_date: datetime,
+    page_bands: list[tuple[float, float, str]] | None,
+) -> Iterable[Block]:
+    """Yield Blocks for the day; Lap rows require right-side lane counts; Shallow/Dive just need time."""
     time_re = re.compile(
-        r"(?P<s>\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))\s*[-–]\s*"
-        r"(?P<e>\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))",
+        r"(?P<s>\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))\s*[-–]\s*(?P<e>\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))",
         re.IGNORECASE,
     )
     lanes_right_re = re.compile(
@@ -257,14 +338,15 @@ def extract_blocks_for_day(day_words: list[dict], local_date: datetime) -> Itera
         re.IGNORECASE,
     )
 
-    markers = _section_markers(day_words)
+    col_markers = _section_markers(day_words)
     for row in _rows_from_words(day_words, tol=ROW_TOL):
-        row_text = " ".join(w["text"] for w in row)
+        row_text = " ".join((w.get("text") or "") for w in row)
         tm = time_re.search(row_text)
         if not tm:
             continue
 
-        kind = _assign_kind(row, markers, default="lap")
+        kind = _assign_kind(row, page_bands, col_markers, default="lap")
+
         sh, sm = time_token_to_24h(tm.group("s"))
         eh, em = time_token_to_24h(tm.group("e"))
         st_utc = to_utc_local_eastern(local_date, sh, sm)
@@ -276,7 +358,7 @@ def extract_blocks_for_day(day_words: list[dict], local_date: datetime) -> Itera
             post = row_text[tm.end():]
             m2 = lanes_right_re.search(post)
             if not m2:
-                continue  # lap rows must have counts to the right
+                continue  # lap rows must include counts to the right of the time
             n1 = int(m2.group("n1"))
             n2 = m2.group("n2")
             label = f"{n1}–{int(n2)}" if n2 else f"{n1}"
@@ -286,16 +368,17 @@ def extract_blocks_for_day(day_words: list[dict], local_date: datetime) -> Itera
         yield Block(
             start=st_utc,
             end=en_utc,
-            kind=kind,
+            kind=kind,  # type: ignore[arg-type]
             label=label,
             source_url="",
             page=0,
-            day="",  # filled by caller
+            day="",
             row_text=row_text,
         )
 
 
 def parse_pdf(url: str) -> tuple[list[Block], dict]:
+    """Download and parse the PDF into blocks; collect debug info for inspection."""
     r = requests.get(url, timeout=60)
     r.raise_for_status()
     now_utc = datetime.now(timezone.utc)
@@ -313,6 +396,7 @@ def parse_pdf(url: str) -> tuple[list[Block], dict]:
 
             words = page.extract_words(keep_blank_chars=False, use_text_flow=True)
             columns, dbg_cols = group_by_day_columns(words)
+            page_bands = _page_section_bands(words)
 
             page_dbg = {
                 "page": page_index,
@@ -321,16 +405,18 @@ def parse_pdf(url: str) -> tuple[list[Block], dict]:
                 "column_mode": dbg_cols.get("mode"),
                 "bounds": dbg_cols.get("bounds"),
                 "headers_raw": dbg_cols.get("headers_raw"),
+                "page_bands": page_bands,
                 "days": {},
             }
 
             for offset, day in enumerate(DAYS):
                 local_date = week_start + timedelta(days=offset)
                 day_words = columns.get(day, [])
-                rows = [" ".join(w["text"] for w in row) for row in _rows_from_words(day_words)]
-                page_dbg["days"][day] = {"rows": rows, "matches": []}
+                rows_txt = [" ".join((w.get("text") or "") for w in row) for row in _rows_from_words(day_words)]
+                page_dbg["days"][day] = {"row_count": len(rows_txt), "rows": rows_txt, "matches": []}
 
-                for blk in extract_blocks_for_day(day_words, local_date):
+                for blk in extract_blocks_for_day(day_words, local_date, page_bands):
+                    # fill metadata
                     blk = Block(
                         start=blk.start,
                         end=blk.end,
@@ -387,6 +473,7 @@ def make_calendar(blocks: list[Block], kind: Kind | None, calname: str) -> Calen
 
 
 def _write_debug(debug: dict, blocks: list[Block]) -> None:
+    """Write debug.json + debug.html to public/ for inspection."""
     os.makedirs("public", exist_ok=True)
     with open("public/debug.json", "w", encoding="utf-8") as f:
         json.dump({"debug": debug, "event_count": len(blocks)}, f, indent=2)
@@ -418,14 +505,16 @@ def _write_debug(debug: dict, blocks: list[Block]) -> None:
         lines.append("<details><summary>Column bounds & headers</summary><pre>")
         lines.append(json.dumps({"bounds": page.get("bounds"), "headers_raw": page.get("headers_raw")}, indent=2))
         lines.append("</pre></details>")
+        lines.append("<details><summary>Page section bands</summary><pre>")
+        lines.append(json.dumps({"page_bands": page.get("page_bands")}, indent=2))
+        lines.append("</pre></details>")
         for day in DAYS:
             d = page["days"].get(day, {})
             matches = d.get("matches", [])
             cls = "ok" if matches else "bad"
-            lines.append(
-                f"<details open><summary class='{cls}'>{day}: {len(matches)} matches</summary>"
-            )
-            lines.append("<pre>Rows:\n" + "\n".join(d.get("rows", [])) + "</pre>")
+            lines.append(f"<details open><summary class='{cls}'>{day}: {len(matches)} matches</summary>")
+            rows = d.get("rows", [])
+            lines.append("<pre>Rows:\n" + ("\n".join(rows) if rows else "(none)") + "</pre>")
             if matches:
                 lines.append("<pre>Matches:\n" + json.dumps(matches, indent=2) + "</pre>")
             lines.append("</details>")
@@ -435,7 +524,7 @@ def _write_debug(debug: dict, blocks: list[Block]) -> None:
 
 
 def _write_index() -> None:
-    """Landing page with an about/disclaimer section and links to feeds."""
+    """Landing page with About/Disclaimer and links to feeds."""
     os.makedirs("public", exist_ok=True)
     owner = os.getenv("GITHUB_REPOSITORY_OWNER", "")
     repo = os.getenv("GITHUB_REPOSITORY", "")
@@ -506,6 +595,7 @@ def main() -> int:
     pdf_url = discover_latest_pdf()
     blocks, debug = parse_pdf(pdf_url)
 
+    # Write calendars
     os.makedirs("public", exist_ok=True)
     for kind, fname, title in [
         ("lap", "ekac-lap.ics", "Brookline EKAC — Lap Lanes"),
