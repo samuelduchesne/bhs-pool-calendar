@@ -2,8 +2,13 @@ name: Publish EKAC lanes calendar
 
 on:
   schedule:
-    - cron: "10 9 * * *"   # ~05:10 ET daily (UTC-based)
-  workflow_dispatch: {}
+    - cron: "10 9 * * *"   # daily publish
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "Publish debug.html & debug.json"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
