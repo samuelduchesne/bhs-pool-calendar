@@ -328,7 +328,13 @@ def extract_blocks_for_day(
     local_date: datetime,
     page_bands: list[tuple[float, float, str]] | None,
 ) -> Iterable[Block]:
-    """Yield Blocks for the day; Lap rows require right-side lane counts; Shallow/Dive just need time."""
+    """Yield Blocks for the day.
+
+    Rule of thumb:
+    - If a time range exists and a lane count exists to the RIGHT → this is a LAP row.
+    - Else classify via page-bands/column markers → SHALLOW or DIVE (label='open').
+    - Skip LAP rows with no counts.
+    """
     time_re = re.compile(
         r"(?P<s>\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))\s*[-–]\s*(?P<e>\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))",
         re.IGNORECASE,
@@ -345,7 +351,9 @@ def extract_blocks_for_day(
         if not tm:
             continue
 
-        kind = _assign_kind(row, page_bands, col_markers, default="lap")
+        # First, look for lane counts to the RIGHT of the time.
+        post = row_text[tm.end():]
+        m2 = lanes_right_re.search(post)
 
         sh, sm = time_token_to_24h(tm.group("s"))
         eh, em = time_token_to_24h(tm.group("e"))
@@ -354,26 +362,26 @@ def extract_blocks_for_day(
         if en_utc <= st_utc:
             en_utc += timedelta(days=1)
 
-        if kind == "lap":
-            post = row_text[tm.end():]
-            m2 = lanes_right_re.search(post)
-            if not m2:
-                continue  # lap rows must include counts to the right of the time
+        if m2:
+            # Ground truth: if counts exist, this *is* a Lap row.
             n1 = int(m2.group("n1"))
             n2 = m2.group("n2")
             label = f"{n1}–{int(n2)}" if n2 else f"{n1}"
-        else:
-            label = "open"
+            yield Block(
+                start=st_utc, end=en_utc, kind="lap", label=label,
+                source_url="", page=0, day="", row_text=row_text
+            )
+            continue
+
+        # No counts → classify via bands/markers.
+        kind = _assign_kind(row, page_bands, col_markers, default="lap")
+        if kind == "lap":
+            # Lap with no counts → skip (keeps lap feed honest).
+            continue
 
         yield Block(
-            start=st_utc,
-            end=en_utc,
-            kind=kind,  # type: ignore[arg-type]
-            label=label,
-            source_url="",
-            page=0,
-            day="",
-            row_text=row_text,
+            start=st_utc, end=en_utc, kind=kind, label="open",
+            source_url="", page=0, day="", row_text=row_text
         )
 
 
