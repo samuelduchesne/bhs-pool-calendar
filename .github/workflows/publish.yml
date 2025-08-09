@@ -157,7 +157,7 @@ jobs:
                   columns[d].sort(key=lambda w: (w["top"], w["x0"]))
               return columns
 
-					def _rows_from_words(day_words: list[dict], tol: float = 3.5) -> list[list[dict]]:
+          def _rows_from_words(day_words: list[dict], tol: float = 3.5) -> list[list[dict]]:
               """Cluster tokens into visual rows by y ('top') with a tolerance."""
               if not day_words:
                   return []
