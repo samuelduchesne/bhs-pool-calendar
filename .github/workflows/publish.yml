@@ -98,12 +98,16 @@ jobs:
               local_dt = datetime(local_date.year, local_date.month, local_date.day, hh, mm, tzinfo=eastern)
               return local_dt.astimezone(timezone.utc)
 
-          def time_token_to_24h(tstr: str) -> Tuple[int, int]:
-              m = re.fullmatch(r"(\d{1,2}):(\d{2})([ap])", tstr)
+          def time_token_to_24h(tstr: str) -> tuple[int, int]:
+              """Parse times like '7a', '7 am', '7:15a', '7:15 am', '7pm', '7:15pm'."""
+              s = tstr.strip().lower().replace(" ", "")
+              m = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?(a|p|am|pm)", s)
               if not m:
                   raise ValueError(f"Bad time token: {tstr}")
-              hh, mm, ap = int(m.group(1)), int(m.group(2)), m.group(3)
-              if ap == "a":
+              hh = int(m.group(1))
+              mm = int(m.group(2) or 0)
+              ap = m.group(3)
+              if ap.startswith("a"):
                   hh = 0 if hh == 12 else hh
               else:
                   hh = 12 if hh == 12 else hh + 12
@@ -133,36 +137,53 @@ jobs:
                   columns[d].sort(key=lambda w: (w["top"], w["x0"]))
               return columns
 
-          def extract_blocks_for_day(day_words: List[dict], local_date: datetime) -> Iterable[Tuple[datetime, datetime, str]]:
-              time_re = re.compile(r"(\d{1,2}:\d{2}[ap])-(\d{1,2}:\d{2}[ap])$")
-              lanes_re = re.compile(r"^\d+(?:-\d+)?$")
+          def extract_blocks_for_day(day_words: list[dict], local_date: datetime) -> Iterable[tuple[datetime, datetime, str]]:
+              # Times: allow spaces and en dashes.
+              time_re = re.compile(
+                  r"(\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))\s*[-–]\s*(\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))$",
+                  re.IGNORECASE,
+              )
+              # Lanes: "5", "4-5", "4–5", "5 lanes", "4-5 Lanes", "(4–5 lanes)".
+              lanes_re = re.compile(
+                  r"^(?:\(|\s*)?(?:lanes?\s*)?(\d{1,2})(?:\s*[–-]\s*(\d{1,2}))?(?:\s*lanes?)?(?:\)|\s*)?$",
+                  re.IGNORECASE,
+              )
+          
               tokens = [w["text"] for w in day_words]
               i = 0
               while i < len(tokens):
-                  t = tokens[i]
+                  t = tokens[i].strip()
                   m = time_re.fullmatch(t)
-                  if m:
-                      lanes_label = None
-                      j = i + 1
-                      while j < len(tokens):
-                          nxt = tokens[j]
-                          if nxt.upper() == "CLOSED":
-                              break
-                          if lanes_re.fullmatch(nxt):
-                              lanes_label = nxt
-                              break
-                          j += 1
-                      if lanes_label:
-                          sh, sm = time_token_to_24h(m.group(1))
-                          eh, em = time_token_to_24h(m.group(2))
-                          st_utc = to_utc_local_eastern(local_date, sh, sm)
-                          en_utc = to_utc_local_eastern(local_date, eh, em)
-                          if en_utc <= st_utc:
-                              en_utc += timedelta(days=1)
-                          yield st_utc, en_utc, lanes_label
-                          i = j + 1
-                      else:
-                          i += 1
+                  if not m:
+                      i += 1
+                      continue
+          
+                  # Look ahead a small window for a lanes pattern; skip filler words.
+                  lanes_label = None
+                  stop_tokens = {"closed"}
+                  j = i + 1
+                  while j < len(tokens) and j <= i + 6:
+                      cand = tokens[j].strip()
+                      if cand.lower() in stop_tokens or time_re.fullmatch(cand):
+                          break
+                      # Normalize multiple tokens like ["4–5", "lanes"] or ["5", "lanes"] by checking each token.
+                      m2 = lanes_re.fullmatch(cand)
+                      if m2:
+                          n1 = int(m2.group(1))
+                          n2 = m2.group(2)
+                          lanes_label = f"{n1}–{int(n2)}" if n2 else f"{n1}"
+                          break
+                      j += 1
+          
+                  if lanes_label:
+                      sh, sm = time_token_to_24h(m.group(1))
+                      eh, em = time_token_to_24h(m.group(2))
+                      st_utc = to_utc_local_eastern(local_date, sh, sm)
+                      en_utc = to_utc_local_eastern(local_date, eh, em)
+                      if en_utc <= st_utc:
+                          en_utc += timedelta(days=1)
+                      yield st_utc, en_utc, lanes_label
+                      i = j + 1
                   else:
                       i += 1
 
