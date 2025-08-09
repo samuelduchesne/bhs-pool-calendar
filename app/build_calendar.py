@@ -435,7 +435,7 @@ def _write_debug(debug: dict, blocks: list[Block]) -> None:
 
 
 def _write_index() -> None:
-    """Landing page with links to feeds."""
+    """Landing page with an about/disclaimer section and links to feeds."""
     os.makedirs("public", exist_ok=True)
     owner = os.getenv("GITHUB_REPOSITORY_OWNER", "")
     repo = os.getenv("GITHUB_REPOSITORY", "")
@@ -446,33 +446,57 @@ def _write_index() -> None:
 <style>
  body{{font:16px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial;margin:24px;color:#222}}
  .card{{border:1px solid #e7e7e7;border-radius:8px;padding:16px;margin:12px 0}}
+ .notice{{background:#fffbea;border-color:#ffe08a}}
  code{{background:#f5f5f5;padding:2px 4px;border-radius:4px}}
  a{{text-decoration:none}}
  h1{{margin:0 0 12px 0}} h2{{margin:12px 0}} p{{margin:8px 0}}
 </style></head><body>
+
+<div class="card notice">
+  <h2>About this project</h2>
+  <p>
+    Unofficial, community-built calendars generated from the weekly Pool Schedule PDF published by the
+    Town of Brookline Recreation Department. For the official schedule, see
+    <a href="{AQUATICS_URL}">the Aquatics Center page</a>.
+  </p>
+  <p>
+    <b>Disclaimer:</b> No guarantees. Parsing can be wrong or out of date; always confirm with the facility.
+    This is just a fun project using ChatGPT 5!
+  </p>
+  <p>Source code: <a href="https://github.com/{repo}">github.com/{repo}</a></p>
+</div>
+
 <h1>Evelyn Kirrane Aquatics Center — Pool Schedules</h1>
 <p>Subscribe to one or more calendars:</p>
+
 <div class="card">
   <h2>Lap Lanes</h2>
   <p>Shows lane availability (e.g., “Lap lanes: 4–5 open”).</p>
-  <p><a href="ekac-lap.ics"><b>HTTPS</b></a> &nbsp;|&nbsp; <a href="webcal://{owner}.github.io/bhs-pool-calendar/ekac-lap.ics"><b>webcal://</b></a></p>
+  <p><a href="ekac-lap.ics"><b>HTTPS</b></a> &nbsp;|&nbsp;
+     <a href="webcal://{owner}.github.io/bhs-pool-calendar/ekac-lap.ics"><b>webcal://</b></a></p>
 </div>
+
 <div class="card">
   <h2>Shallow Pool</h2>
   <p>Shallow pool open/closed times.</p>
-  <p><a href="ekac-shallow.ics"><b>HTTPS</b></a> &nbsp;|&nbsp; <a href="webcal://{owner}.github.io/bhs-pool-calendar/ekac-shallow.ics"><b>webcal://</b></a></p>
+  <p><a href="ekac-shallow.ics"><b>HTTPS</b></a> &nbsp;|&nbsp;
+     <a href="webcal://{owner}.github.io/bhs-pool-calendar/ekac-shallow.ics"><b>webcal://</b></a></p>
 </div>
+
 <div class="card">
   <h2>Dive Well</h2>
   <p>Dive well open/closed times.</p>
-  <p><a href="ekac-dive.ics"><b>HTTPS</b></a> &nbsp;|&nbsp; <a href="webcal://{owner}.github.io/bhs-pool-calendar/ekac-dive.ics"><b>webcal://</b></a></p>
+  <p><a href="ekac-dive.ics"><b>HTTPS</b></a> &nbsp;|&nbsp;
+     <a href="webcal://{owner}.github.io/bhs-pool-calendar/ekac-dive.ics"><b>webcal://</b></a></p>
 </div>
+
 <div class="card">
   <h2>All-in-one</h2>
   <p>Includes Lap, Shallow, and Dive in one feed.</p>
-  <p><a href="ekac.ics"><b>HTTPS</b></a> &nbsp;|&nbsp; <a href="webcal://{owner}.github.io/bhs-pool-calendar/ekac.ics"><b>webcal://</b></a></p>
+  <p><a href="ekac.ics"><b>HTTPS</b></a> &nbsp;|&nbsp;
+     <a href="webcal://{owner}.github.io/bhs-pool-calendar/ekac.ics"><b>webcal://</b></a></p>
 </div>
-<p style="margin-top:24px">Source code: <a href="https://github.com/{repo}">GitHub</a></p>
+
 </body></html>"""
     with open("public/index.html", "w", encoding="utf-8") as f:
         f.write(html)
