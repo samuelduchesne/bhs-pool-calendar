@@ -220,28 +220,37 @@ def extract_blocks_for_day(
     day_words: list[dict],
     local_date: datetime,
 ) -> Iterable[tuple[datetime, datetime, str, str]]:
-    """Yield (start_utc, end_utc, lanes_label, row_text) using row-based scanning."""
+    """Yield (start_utc, end_utc, lanes_label, row_text) scanning only to the RIGHT of the time range.
+
+    Assumes lane counts always follow the time (same row). We purposely ignore any numbers to the left
+    to avoid picking up neighboring-column junk (e.g., Saturday counts showing up in Sunday).
+    """
     time_re = re.compile(
         r"(?P<s>\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))\s*[-–]\s*(?P<e>\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))",
         re.IGNORECASE,
     )
-    lanes_re = re.compile(r"(?:^|\D)(?P<n1>\d{1,2})(?:\s*[–-]\s*(?P<n2>\d{1,2}))?(?:\D|$)")
+    # Right-side lane pattern: 5, 4-5, 4–5, with optional "lanes"
+    lanes_right_re = re.compile(
+        r"(?<!\d)(?P<n1>\d{1,2})(?:\s*[–-]\s*(?P<n2>\d{1,2}))?(?:\s*lanes?)?(?!\d)",
+        re.IGNORECASE,
+    )
 
     for row in _rows_from_words(day_words, tol=ROW_TOL):
         row_text = " ".join(w["text"] for w in row)
         m = time_re.search(row_text)
         if not m:
             continue
-        # Prefer a lanes number that appears after the time range
-        lanes = None
+
+        # only look to the RIGHT of the time range
         post = row_text[m.end():]
-        for m2 in lanes_re.finditer(post):
-            n1 = int(m2.group("n1"))
-            n2 = m2.group("n2")
-            lanes = f"{n1}–{int(n2)}" if n2 else f"{n1}"
-            break
-        if not lanes:
+        m2 = lanes_right_re.search(post)
+        if not m2:
+            # strict: skip if lanes not found to the right
             continue
+
+        n1 = int(m2.group("n1"))
+        n2 = m2.group("n2")
+        lanes = f"{n1}–{int(n2)}" if n2 else f"{n1}"
 
         sh, sm = time_token_to_24h(m.group("s"))
         eh, em = time_token_to_24h(m.group("e"))
@@ -249,8 +258,8 @@ def extract_blocks_for_day(
         en_utc = to_utc_local_eastern(local_date, eh, em)
         if en_utc <= st_utc:
             en_utc += timedelta(days=1)
-        yield st_utc, en_utc, lanes, row_text
 
+        yield st_utc, en_utc, lanes, row_text
 
 def parse_pdf(url: str) -> tuple[list[Block], dict]:
     """Download and parse the PDF into lap-lane blocks; collect debug info."""
