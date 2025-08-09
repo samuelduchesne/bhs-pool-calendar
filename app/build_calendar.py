@@ -136,7 +136,7 @@ def _rows_from_words(day_words: list[dict], tol: float = ROW_TOL) -> list[list[d
 
 
 def group_by_day_columns(words: list[dict]) -> tuple[dict[str, list[dict]], dict]:
-    """Assign tokens to weekday columns. Fall back to 7 equal bands if headers missing."""
+    """Assign tokens to weekday columns with a left-biased boundary to avoid spillover."""
     name_map = {
         "monday": "Monday", "mon": "Monday",
         "tuesday": "Tuesday", "tue": "Tuesday", "tues": "Tuesday",
@@ -146,6 +146,16 @@ def group_by_day_columns(words: list[dict]) -> tuple[dict[str, list[dict]], dict
         "saturday": "Saturday", "sat": "Saturday",
         "sunday": "Sunday", "sun": "Sunday",
     }
+
+    try:
+        gutter_px = float(os.environ.get("COL_GUTTER_PX", "16.0"))  # boundary gutter
+    except ValueError:
+        gutter_px = 16.0
+    try:
+        left_bias_px = float(os.environ.get("COL_LEFT_BIAS_PX", "6.0"))
+    except ValueError:
+        left_bias_px = 6.0
+
     headers: list[tuple[str, float]] = []
     for w in words:
         key = name_map.get(w["text"].strip().lower())
@@ -153,50 +163,56 @@ def group_by_day_columns(words: list[dict]) -> tuple[dict[str, list[dict]], dict
             headers.append((key, (w["x0"] + w["x1"]) / 2.0))
 
     debug = {"headers_raw": headers}
+
     best: dict[str, float] = {}
     for name, xmid in sorted(headers, key=lambda t: t[1]):
         if name not in best:
             best[name] = xmid
 
-    bounds: list[tuple[str, float, float]] = []
     if len(best) >= 7:
-        ordered = [
+        centers = [
             ("Monday", best["Monday"]), ("Tuesday", best["Tuesday"]), ("Wednesday", best["Wednesday"]),
             ("Thursday", best["Thursday"]), ("Friday", best["Friday"]), ("Saturday", best["Saturday"]),
             ("Sunday", best["Sunday"]),
         ]
-        for i, (day, xmid) in enumerate(ordered):
-            left = -1e9 if i == 0 else (ordered[i - 1][1] + xmid) / 2.0
-            right = 1e9 if i == 6 else (xmid + ordered[i + 1][1]) / 2.0
-            bounds.append((day, left, right))
         debug["mode"] = "headers"
     else:
-        # Fallback: split the page width into 7 equal vertical bands.
         if not words:
             minx, maxx = 0.0, 1000.0
         else:
             minx = min(w["x0"] for w in words)
             maxx = max(w["x1"] for w in words)
         step = (maxx - minx) / 7.0 if maxx > minx else 100.0
-        x = minx
+        centers = []
         for i, day in enumerate(DAYS):
-            left = x
-            right = maxx if i == 6 else x + step
-            bounds.append((day, left, right))
-            x += step
+            left = minx + i * step
+            right = minx + (i + 1) * step
+            centers.append((day, (left + right) / 2.0))
         debug["mode"] = "equal-bands"
 
+    # Midpoint boundaries between centers:
+    bounds = [(centers[i][1] + centers[i + 1][1]) / 2.0 for i in range(len(centers) - 1)]
     debug["bounds"] = bounds
+    debug["centers"] = centers
 
-    columns: dict[str, list[dict]] = {d: [] for d in DAYS}
+    columns: dict[str, list[dict]] = {d: [] for d, _ in centers}
     for w in words:
         xmid = (w["x0"] + w["x1"]) / 2.0
-        for day, left, right in bounds:
-            if left <= xmid <= right:
-                columns[day].append(w)
-                break
+
+        # Nearest center
+        dists = [abs(xmid - c[1]) for c in centers]
+        j = min(range(len(dists)), key=lambda k: dists[k])
+
+        # If we're within a gutter of the left boundary of this column, shove left.
+        if j > 0:
+            left_boundary = (centers[j - 1][1] + centers[j][1]) / 2.0
+            if xmid - left_boundary <= gutter_px and (dists[j] - dists[j - 1]) <= left_bias_px:
+                j -= 1
+
+        columns[centers[j][0]].append(w)
+
     for d in columns:
-        columns[d].sort(key=lambda w: (w["top"], w["x0"]))
+        columns[d].sort(key=lambda ww: (ww["top"], ww["x0"]))
     return columns, debug
 
 
