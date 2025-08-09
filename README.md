@@ -1,27 +1,61 @@
 # bhs-pool-calendar
 
-Scrapes the latest Brookline High School / Evelyn Kirrane Aquatics Center **Pool Schedule** PDF and publishes an
-iCal feed showing **lap-lane availability** (“Lap lanes: N or N–M open”) via GitHub Actions + Pages. Zero servers.
+Generates iCal feeds for the Evelyn Kirrane Aquatics Center (Brookline High School) pool schedule by parsing the
+weekly PDF and publishing calendars via GitHub Actions + Pages.
 
-**Calendar URL (after enabling GitHub Pages):**
-https://samuelduchesne.github.io/bhs-pool-calendar/ekac.ics
+## About & Disclaimer
+
+> **Unofficial project.** This repository is maintained by the community and is not affiliated with the Town of
+> Brookline. The feeds are generated automatically by scraping the public PDF. **No guarantees**: parsing can be wrong,
+> stale, or incomplete. **Always confirm** with the facility’s official schedule:
+> https://www.brooklinerec.com/150/Aquatics-Center  
+> This is just a fun project using ChatGPT 5.
+
+---
+
+## Feeds
+
+Landing page (choose your calendar):  
+https://samuelduchesne.github.io/bhs-pool-calendar/
+
+Direct feeds:
+- **Lap lanes:** https://samuelduchesne.github.io/bhs-pool-calendar/ekac-lap.ics
+- **Shallow pool:** https://samuelduchesne.github.io/bhs-pool-calendar/ekac-shallow.ics
+- **Dive well:** https://samuelduchesne.github.io/bhs-pool-calendar/ekac-dive.ics
+- **All-in-one:** https://samuelduchesne.github.io/bhs-pool-calendar/ekac.ics
+
+> Subscribe in Apple/Google Calendar by adding the `.ics` URL.
 
 ## How it works
-- Discovers the newest **Pool Schedule** PDF from the Aquatics page; falls back to a stable DocumentCenter ID.
-- Parses Monday–Sunday columns and converts each time block with lane counts into a calendar event.
-- Exports events in **UTC** so calendar apps render correctly in local time (America/New_York).
-- Publishes daily at ~05:10 ET and on manual runs via GitHub Actions. Output is served by **GitHub Pages**.
 
-## Quick deploy (phone-friendly)
-1. Create repo `bhs-pool-calendar` (Public).
-2. Add `.github/workflows/publish.yml` (see repo) and commit to `main`.
-3. Repo → **Settings → Pages** → Source: **GitHub Actions**.
-4. **Actions** tab → run “Publish EKAC lanes calendar”.
-5. Subscribe to the Calendar URL above in Apple/Google Calendar.
+- Finds the latest “Pool Schedule” PDF on the Aquatics page (with a stable fallback).
+- Parses weekday columns using page geometry; clusters text into rows to extract time ranges.
+- Builds four iCal feeds (Lap / Shallow / Dive / All) and publishes them to GitHub Pages on a daily cron
+  and on manual runs.
 
-## Local development
+## Development
+
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install requests pdfplumber python-dateutil icalendar beautifulsoup4
+pip install -r requirements.txt
 python app/build_calendar.py
-open public/ekac.ics
+open public/index.html
+```
+
+Environment toggles (used by the workflow):
+
+- `DEBUG=1` → publish debug.html / debug.json for troubleshooting
+- `ROW_TOL` (default 3.5) → row clustering tolerance (pixels)
+- `COL_GUTTER_PX` (default 16) → left-bias gutter to prevent Sat/Sun column bleed
+- `COL_LEFT_BIAS_PX` (default 6) → tie-break toward the left column
+
+### Contributing
+
+Issues and PRs are welcome—especially if the PDF layout changes and parsing needs tweaks.
+If you report a parsing problem, please include:
+	•	Date/day and the affected row text from debug.html
+	•	What the expected events should be
+
+### License
+
+MIT. See [LICENSE](LICENSE).
