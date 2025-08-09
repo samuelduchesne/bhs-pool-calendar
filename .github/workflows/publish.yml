@@ -113,79 +113,105 @@ jobs:
                   hh = 12 if hh == 12 else hh + 12
               return hh, mm
 
-          def group_by_day_columns(words: List[dict]) -> dict[str, List[dict]]:
-              headers: List[Tuple[str, float]] = []
+          def group_by_day_columns(words: list[dict]) -> dict[str, list[dict]]:
+              name_map = {
+                  "monday": "Monday", "mon": "Monday",
+                  "tuesday": "Tuesday", "tue": "Tuesday", "tues": "Tuesday",
+                  "wednesday": "Wednesday", "wed": "Wednesday",
+                  "thursday": "Thursday", "thu": "Thursday", "thur": "Thursday", "thurs": "Thursday",
+                  "friday": "Friday", "fri": "Friday",
+                  "saturday": "Saturday", "sat": "Saturday",
+                  "sunday": "Sunday", "sun": "Sunday",
+              }
+              headers: list[tuple[str, float]] = []
               for w in words:
-                  if w["text"] in DAYS:
-                      headers.append((w["text"], (w["x0"] + w["x1"]) / 2.0))
-              if len(headers) != 7:
-                  raise ValueError("Failed to find Monday..Sunday headers")
-              headers.sort(key=lambda t: t[1])
-              bounds: List[Tuple[str, float, float]] = []
-              for i, (_, xmid) in enumerate(headers):
-                  left = -1e9 if i == 0 else (headers[i - 1][1] + xmid) / 2.0
-                  right = 1e9 if i == 6 else (xmid + headers[i + 1][1]) / 2.0
-                  bounds.append((DAYS[i], left, right))
-              columns: dict[str, List[dict]] = {d: [] for d in DAYS}
+                  key = name_map.get(w["text"].strip().lower())
+                  if key:
+                      headers.append((key, (w["x0"] + w["x1"]) / 2.0))
+              # take the leftmost instance of each weekday to avoid duplicate matches
+              best: dict[str, float] = {}
+              for name, xmid in sorted(headers, key=lambda t: t[1]):
+                  if name not in best:
+                      best[name] = xmid
+              if len(best) < 7:
+                  raise ValueError("Failed to find weekday headers")
+          
+              ordered = [("Monday", best["Monday"]), ("Tuesday", best["Tuesday"]), ("Wednesday", best["Wednesday"]),
+                         ("Thursday", best["Thursday"]), ("Friday", best["Friday"]), ("Saturday", best["Saturday"]),
+                         ("Sunday", best["Sunday"])]
+          
+              bounds: list[tuple[str, float, float]] = []
+              for i, (day, xmid) in enumerate(ordered):
+                  left = -1e9 if i == 0 else (ordered[i - 1][1] + xmid) / 2.0
+                  right = 1e9 if i == 6 else (xmid + ordered[i + 1][1]) / 2.0
+                  bounds.append((day, left, right))
+          
+              columns: dict[str, list[dict]] = {d: [] for d, _ in ordered}
               for w in words:
                   xmid = (w["x0"] + w["x1"]) / 2.0
                   for day, left, right in bounds:
                       if left <= xmid <= right:
                           columns[day].append(w)
                           break
-              for d in DAYS:
+              for d in columns:
                   columns[d].sort(key=lambda w: (w["top"], w["x0"]))
               return columns
 
+					def _rows_from_words(day_words: list[dict], tol: float = 3.5) -> list[list[dict]]:
+              """Cluster tokens into visual rows by y ('top') with a tolerance."""
+              if not day_words:
+                  return []
+              ws = sorted(day_words, key=lambda w: (w["top"], w["x0"]))
+              rows: list[list[dict]] = []
+              cur: list[dict] = [ws[0]]
+              cur_y = ws[0]["top"]
+              for w in ws[1:]:
+                  if abs(w["top"] - cur_y) <= tol:
+                      cur.append(w)
+                  else:
+                      rows.append(cur)
+                      cur = [w]
+                      cur_y = w["top"]
+              rows.append(cur)
+              # sort each row left→right
+              for r in rows:
+                  r.sort(key=lambda w: w["x0"])
+              return rows
+
           def extract_blocks_for_day(day_words: list[dict], local_date: datetime) -> Iterable[tuple[datetime, datetime, str]]:
-              # Times: allow spaces and en dashes.
+              # Time range: allow spaces, optional minutes, hyphen/en-dash, a/p/am/pm
               time_re = re.compile(
-                  r"(\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))\s*[-–]\s*(\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))$",
+                  r"(?P<s>\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))\s*[-–]\s*(?P<e>\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))",
                   re.IGNORECASE,
               )
-              # Lanes: "5", "4-5", "4–5", "5 lanes", "4-5 Lanes", "(4–5 lanes)".
+              # Lanes: "5", "4-5", "4–5", with optional 'lane(s)' noise around it
               lanes_re = re.compile(
-                  r"^(?:\(|\s*)?(?:lanes?\s*)?(\d{1,2})(?:\s*[–-]\s*(\d{1,2}))?(?:\s*lanes?)?(?:\)|\s*)?$",
+                  r"(?:^|\D)(?P<n1>\d{1,2})(?:\s*[–-]\s*(?P<n2>\d{1,2}))?(?:\D|$)",
                   re.IGNORECASE,
               )
           
-              tokens = [w["text"] for w in day_words]
-              i = 0
-              while i < len(tokens):
-                  t = tokens[i].strip()
-                  m = time_re.fullmatch(t)
+              for row in _rows_from_words(day_words):
+                  row_text = " ".join(w["text"] for w in row)
+                  m = time_re.search(row_text)
                   if not m:
-                      i += 1
+                      continue
+                  # prefer a lanes number that appears *after* the time range in the same row
+                  lanes = None
+                  for m2 in lanes_re.finditer(row_text[m.end():]):
+                      n1 = int(m2.group("n1"))
+                      n2 = m2.group("n2")
+                      lanes = f"{n1}–{int(n2)}" if n2 else f"{n1}"
+                      break
+                  if not lanes:
                       continue
           
-                  # Look ahead a small window for a lanes pattern; skip filler words.
-                  lanes_label = None
-                  stop_tokens = {"closed"}
-                  j = i + 1
-                  while j < len(tokens) and j <= i + 6:
-                      cand = tokens[j].strip()
-                      if cand.lower() in stop_tokens or time_re.fullmatch(cand):
-                          break
-                      # Normalize multiple tokens like ["4–5", "lanes"] or ["5", "lanes"] by checking each token.
-                      m2 = lanes_re.fullmatch(cand)
-                      if m2:
-                          n1 = int(m2.group(1))
-                          n2 = m2.group(2)
-                          lanes_label = f"{n1}–{int(n2)}" if n2 else f"{n1}"
-                          break
-                      j += 1
-          
-                  if lanes_label:
-                      sh, sm = time_token_to_24h(m.group(1))
-                      eh, em = time_token_to_24h(m.group(2))
-                      st_utc = to_utc_local_eastern(local_date, sh, sm)
-                      en_utc = to_utc_local_eastern(local_date, eh, em)
-                      if en_utc <= st_utc:
-                          en_utc += timedelta(days=1)
-                      yield st_utc, en_utc, lanes_label
-                      i = j + 1
-                  else:
-                      i += 1
+                  sh, sm = time_token_to_24h(m.group("s"))
+                  eh, em = time_token_to_24h(m.group("e"))
+                  st_utc = to_utc_local_eastern(local_date, sh, sm)
+                  en_utc = to_utc_local_eastern(local_date, eh, em)
+                  if en_utc <= st_utc:
+                      en_utc += timedelta(days=1)
+                  yield st_utc, en_utc, lanes
 
           def parse_pdf(url: str) -> List[Block]:
               r = requests.get(url, timeout=60)
