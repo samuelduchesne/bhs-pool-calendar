@@ -4,7 +4,7 @@ Scrapes the latest Brookline High School / Evelyn Kirrane Aquatics Center **Pool
 iCal feed showing **lap-lane availability** (“Lap lanes: N or N–M open”) via GitHub Actions + Pages. Zero servers.
 
 **Calendar URL (after enabling GitHub Pages):**
-https://.github.io/bhs-pool-calendar/ekac.ics
+https://samuelduchesne.github.io/bhs-pool-calendar/ekac.ics
 
 ## How it works
 - Discovers the newest **Pool Schedule** PDF from the Aquatics page; falls back to a stable DocumentCenter ID.
