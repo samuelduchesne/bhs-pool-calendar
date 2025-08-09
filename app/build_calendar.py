@@ -349,7 +349,8 @@ def _write_debug(debug: dict, blocks: list[Block]) -> None:
         json.dump({"debug": debug, "event_count": len(blocks)}, f, indent=2)
 
     lines = []
-    lines.append("<html><head><meta charset='utf-8'><title>EKAC Debug</title>")
+    lines.append("<html><head><meta charset='utf-8'><meta name='robots' content='noindex,nofollow'>"
+             "<title>EKAC Debug</title>")
     lines.append(
         "<style>body{font:14px/1.4 -apple-system,Segoe UI,Roboto,Helvetica,Arial}"
         "pre{white-space:pre-wrap;word-break:break-word}"
