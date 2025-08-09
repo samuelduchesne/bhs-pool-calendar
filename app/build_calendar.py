@@ -327,7 +327,7 @@ def parse_pdf(url: str) -> tuple[list[Block], dict]:
             for offset, day in enumerate(DAYS):
                 local_date = week_start + timedelta(days=offset)
                 day_words = columns.get(day, [])
-                rows = [" ".join(w["text"] for w in _rows_from_words(day_words))]
+                rows = [" ".join(w["text"] for w in row) for row in _rows_from_words(day_words)]
                 page_dbg["days"][day] = {"rows": rows, "matches": []}
 
                 for blk in extract_blocks_for_day(day_words, local_date):
