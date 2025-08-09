@@ -40,3 +40,22 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python app/build_calendar.py
 open public/index.html
+```
+
+Environment toggles (used by the workflow):
+
+- `DEBUG=1` → publish debug.html / debug.json for troubleshooting
+- `ROW_TOL` (default 3.5) → row clustering tolerance (pixels)
+- `COL_GUTTER_PX` (default 16) → left-bias gutter to prevent Sat/Sun column bleed
+- `COL_LEFT_BIAS_PX` (default 6) → tie-break toward the left column
+
+### Contributing
+
+Issues and PRs are welcome—especially if the PDF layout changes and parsing needs tweaks.
+If you report a parsing problem, please include:
+	•	Date/day and the affected row text from debug.html
+	•	What the expected events should be
+
+### License
+
+MIT. See [LICENSE](LICENSE).
