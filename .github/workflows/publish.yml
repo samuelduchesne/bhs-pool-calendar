@@ -37,9 +37,6 @@ jobs:
       - name: Build calendar
         env:
           DEBUG: ${{ (github.event_name == 'workflow_dispatch' && inputs.debug) && '1' || '0' }}
-          ROW_TOL: "4"   # adjust if rows are splitting/merging oddly
-          COL_GUTTER_PX: "18"
-          COL_LEFT_BIAS_PX: "6"
         run: python app/build_calendar.py
 
       - uses: actions/upload-pages-artifact@v3

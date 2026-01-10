@@ -1,64 +1,46 @@
 #!/usr/bin/env python3
-"""Build iCal feeds for EKAC Lap, Shallow, and Dive, with optional debug artifacts.
+"""Build iCal feeds for EKAC Lap, Shallow, and Dive from Google Sheets.
 
-- Finds the latest Pool Schedule PDF (Aquatics page; fallback to fixed ID).
-- Splits the page into weekday columns (left-biased boundary to prevent cross-column bleed).
-- Clusters text into visual rows; classifies each row into Lap / Shallow / Dive via:
-    1) page-level vertical bands inferred from any section headers found anywhere on the page,
-    2) falling back to per-column section markers above the row,
-    3) defaulting to Lap if neither is found.
-- Extracts time ranges; for Lap rows it also extracts lane counts (to the RIGHT of the time).
+- Fetches the Pool Schedule from Google Sheets (as CSV).
+- Parses the CSV to extract schedule information for each day of the week.
+- Classifies each row into Lap / Shallow / Dive based on content.
+- Extracts time ranges; for Lap rows it also extracts lane counts.
 - Writes four feeds:
     public/ekac-lap.ics
     public/ekac-shallow.ics
     public/ekac-dive.ics
     public/ekac.ics   (combined)
-- Writes public/index.html (landing page with “About/Disclaimer”).
+- Writes public/index.html (landing page with "About/Disclaimer").
 - If DEBUG=1, also writes public/debug.html and public/debug.json.
 
 Env:
   DEBUG=1                 -> write debug artifacts
-  ROW_TOL=3.5             -> row clustering tolerance (px)
-  COL_GUTTER_PX=16        -> left-biased gutter (px) near day boundaries
-  COL_LEFT_BIAS_PX=6      -> tie-break toward the left column (px)
 """
 
 from __future__ import annotations
 
+import csv
 import hashlib
-import io
 import json
 import os
 import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Iterable, Literal, Tuple
+from typing import Iterable, Literal
 
-import pdfplumber
 import requests
-from bs4 import BeautifulSoup
 from dateutil import parser as dtparse
 from icalendar import Calendar, Event
 
+# Google Sheets URL - can be overridden with env var
+SHEETS_ID = "1eYOnElx9lFYqS7XgjnhZrjDY5xWY_96RWftZ7TK1acU"
+SHEETS_URL = f"https://docs.google.com/spreadsheets/d/{SHEETS_ID}/export?format=csv"
 AQUATICS_URL = "https://www.brooklinerec.com/150/Aquatics-Center"
-FALLBACK_PDF = "https://www.brooklinerec.com/DocumentCenter/View/4404/Pool-Schedule?bidId="
 
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 DEBUG = os.environ.get("DEBUG", "0") == "1"
-
-
-def _get_float_env(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, str(default)))
-    except ValueError:
-        return default
-
-
-ROW_TOL = _get_float_env("ROW_TOL", 3.5)
-COL_GUTTER_PX = _get_float_env("COL_GUTTER_PX", 16.0)
-COL_LEFT_BIAS_PX = _get_float_env("COL_LEFT_BIAS_PX", 6.0)
 
 Kind = Literal["lap", "shallow", "dive"]
 
@@ -70,7 +52,6 @@ class Block:
     kind: Kind
     label: str  # "5", "4–5" for lap; "open" for shallow/dive
     source_url: str
-    page: int
     day: str
     row_text: str
 
@@ -82,43 +63,65 @@ SECTION_KEYS = {
 }
 
 
-def discover_latest_pdf() -> str:
-    """Try to discover the latest Pool Schedule PDF; fall back to a stable ID."""
-    try:
-        resp = requests.get(AQUATICS_URL, timeout=30)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            text = (a.get_text() or "").lower()
-            if ("/DocumentCenter/View/" in href) and ("pool" in text and "schedule" in text):
-                return requests.compat.urljoin(AQUATICS_URL, href)
-        # fallback to href-only match if the anchor text is missing
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if "/DocumentCenter/View/" in href and "Pool" in href and "Schedule" in href:
-                return requests.compat.urljoin(AQUATICS_URL, href)
-    except Exception:
-        pass
-    return FALLBACK_PDF
+def fetch_sheet_csv() -> str:
+    """Fetch the Google Sheet as CSV text."""
+    url = os.environ.get("SHEETS_URL", SHEETS_URL)
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    return resp.text
 
 
-def month_span_to_dates(header: str, now_utc: datetime) -> Tuple[datetime, datetime] | None:
-    """Parse 'Pool Schedule for August 4-10' into (start_date, end_date) at midnight UTC."""
-    m = re.search(r"Pool Schedule\s*(?:for)?\s+([A-Za-z]+)\s+(\d{1,2})\s*[-–]\s*(\d{1,2})", header)
-    if not m:
-        return None
-    month, d1, d2 = m.group(1), int(m.group(2)), int(m.group(3))
-    candidates = []
-    for year in (now_utc.year - 1, now_utc.year, now_utc.year + 1):
-        s = dtparse.parse(f"{month} {d1}, {year}").date()
-        e = dtparse.parse(f"{month} {d2}, {year}").date()
-        candidates.append((s, e, abs((now_utc.date() - s).days)))
-    s, e, _ = min(candidates, key=lambda t: t[2])
-    return (
-        datetime(s.year, s.month, s.day, tzinfo=timezone.utc),
-        datetime(e.year, e.month, e.day, tzinfo=timezone.utc),
-    )
+def parse_week_header(header_text: str, now_utc: datetime) -> tuple[datetime, datetime] | None:
+    """Parse schedule header to determine the week range.
+    
+    Examples:
+    - "Pool Schedule for August 4-10"
+    - "Week of August 4-10, 2024"
+    - "August 4-10"
+    """
+    # Try different patterns
+    patterns = [
+        r"([A-Za-z]+)\s+(\d{1,2})\s*[-–]\s*(\d{1,2})(?:,?\s*(\d{4}))?",
+        r"(?:Pool Schedule\s*(?:for)?|Week of)\s+([A-Za-z]+)\s+(\d{1,2})\s*[-–]\s*(\d{1,2})(?:,?\s*(\d{4}))?",
+    ]
+    
+    for pattern in patterns:
+        m = re.search(pattern, header_text, re.IGNORECASE)
+        if m:
+            groups = m.groups()
+            month = groups[0] if groups[0] else groups[1]
+            d1 = int(groups[1] if groups[0] else groups[2])
+            d2 = int(groups[2] if groups[0] else groups[3])
+            year = int(groups[3]) if len(groups) > 3 and groups[3] else None
+            
+            # If year not specified, find closest year
+            if year is None:
+                candidates = []
+                for y in (now_utc.year - 1, now_utc.year, now_utc.year + 1):
+                    try:
+                        s = dtparse.parse(f"{month} {d1}, {y}").date()
+                        e = dtparse.parse(f"{month} {d2}, {y}").date()
+                        candidates.append((s, e, abs((now_utc.date() - s).days)))
+                    except:
+                        continue
+                if candidates:
+                    s, e, _ = min(candidates, key=lambda t: t[2])
+                    return (
+                        datetime(s.year, s.month, s.day, tzinfo=timezone.utc),
+                        datetime(e.year, e.month, e.day, tzinfo=timezone.utc),
+                    )
+            else:
+                try:
+                    s = dtparse.parse(f"{month} {d1}, {year}").date()
+                    e = dtparse.parse(f"{month} {d2}, {year}").date()
+                    return (
+                        datetime(s.year, s.month, s.day, tzinfo=timezone.utc),
+                        datetime(e.year, e.month, e.day, tzinfo=timezone.utc),
+                    )
+                except:
+                    pass
+    
+    return None
 
 
 def to_utc_local_eastern(local_date: datetime, hh: int, mm: int) -> datetime:
@@ -146,308 +149,176 @@ def time_token_to_24h(tstr: str) -> tuple[int, int]:
     return hh, mm
 
 
-def _rows_from_words(day_words: list[dict], tol: float = ROW_TOL) -> list[list[dict]]:
-    """Cluster tokens into visual rows by y ('top') with tolerance."""
-    if not day_words:
-        return []
-    ws = sorted(day_words, key=lambda w: (w["top"], w["x0"]))
-    rows: list[list[dict]] = []
-    cur: list[dict] = [ws[0]]
-    cur_y = ws[0]["top"]
-    for w in ws[1:]:
-        if abs(w["top"] - cur_y) <= tol:
-            cur.append(w)
-        else:
-            rows.append(cur)
-            cur = [w]
-            cur_y = w["top"]
-    rows.append(cur)
-    for r in rows:
-        r.sort(key=lambda w: w["x0"])
-    return rows
+def classify_kind(text: str) -> Kind:
+    """Classify a schedule entry as lap, shallow, or dive based on text content."""
+    text_lower = text.lower()
+    
+    # Check for specific markers
+    for kind, keys in SECTION_KEYS.items():
+        for key in keys:
+            if key in text_lower:
+                return kind  # type: ignore
+    
+    # Default to lap if not specified
+    return "lap"
 
 
-def group_by_day_columns(words: list[dict]) -> tuple[dict[str, list[dict]], dict]:
-    """Assign tokens to weekday columns with a left-biased boundary gutter."""
-    name_map = {
-        "monday": "Monday",
-        "mon": "Monday",
-        "tuesday": "Tuesday",
-        "tue": "Tuesday",
-        "tues": "Tuesday",
-        "wednesday": "Wednesday",
-        "wed": "Wednesday",
-        "thursday": "Thursday",
-        "thu": "Thursday",
-        "thur": "Thursday",
-        "thurs": "Thursday",
-        "friday": "Friday",
-        "fri": "Friday",
-        "saturday": "Saturday",
-        "sat": "Saturday",
-        "sunday": "Sunday",
-        "sun": "Sunday",
-    }
-
-    headers: list[tuple[str, float]] = []
-    for w in words:
-        key = name_map.get((w.get("text") or "").strip().lower())
-        if key:
-            headers.append((key, (w["x0"] + w["x1"]) / 2.0))
-
-    debug = {"headers_raw": headers}
-
-    best: dict[str, float] = {}
-    for name, xmid in sorted(headers, key=lambda t: t[1]):
-        if name not in best:
-            best[name] = xmid
-
-    if len(best) >= 7:
-        centers = [
-            ("Monday", best["Monday"]),
-            ("Tuesday", best["Tuesday"]),
-            ("Wednesday", best["Wednesday"]),
-            ("Thursday", best["Thursday"]),
-            ("Friday", best["Friday"]),
-            ("Saturday", best["Saturday"]),
-            ("Sunday", best["Sunday"]),
-        ]
-        debug["mode"] = "headers"
-    else:
-        # Fallback: approximate equal-width centers across page
-        if not words:
-            minx, maxx = 0.0, 1000.0
-        else:
-            minx = min(w["x0"] for w in words)
-            maxx = max(w["x1"] for w in words)
-        step = (maxx - minx) / 7.0 if maxx > minx else 100.0
-        centers = []
-        for i, day in enumerate(DAYS):
-            left = minx + i * step
-            right = minx + (i + 1) * step
-            centers.append((day, (left + right) / 2.0))
-        debug["mode"] = "equal-bands"
-
-    bounds = [(centers[i][1] + centers[i + 1][1]) / 2.0 for i in range(len(centers) - 1)]
-    debug["bounds"] = bounds
-    debug["centers"] = centers
-
-    columns: dict[str, list[dict]] = {d: [] for d, _ in centers}
-    for w in words:
-        xmid = (w["x0"] + w["x1"]) / 2.0
-        dists = [abs(xmid - c[1]) for c in centers]
-        j = min(range(len(dists)), key=lambda k: dists[k])
-        if j > 0:
-            left_boundary = (centers[j - 1][1] + centers[j][1]) / 2.0
-            if xmid - left_boundary <= COL_GUTTER_PX and (dists[j] - dists[j - 1]) <= COL_LEFT_BIAS_PX:
-                j -= 1
-        columns[centers[j][0]].append(w)
-
-    for d in columns:
-        columns[d].sort(key=lambda ww: (ww["top"], ww["x0"]))
-    return columns, debug
+def extract_lane_count(text: str) -> str:
+    """Extract lane count from text like '4-5 lanes', '5 lanes', etc."""
+    # Look for patterns like "4-5", "4–5", "5"
+    m = re.search(r"(?<!\d)(\d{1,2})\s*[-–]\s*(\d{1,2})(?:\s*lanes?)?", text, re.IGNORECASE)
+    if m:
+        return f"{m.group(1)}–{m.group(2)}"
+    
+    m = re.search(r"(?<!\d)(\d{1,2})(?:\s*lanes?)(?!\d)", text, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    
+    return "open"
 
 
-def _section_markers(words: list[dict]) -> list[tuple[float, str]]:
-    """Return [(y_top, kind)] for section headers within a single day column."""
-    markers: list[tuple[float, str]] = []
-    for w in words:
-        txt = (w.get("text") or "").strip().lower()
-        for kind, keys in SECTION_KEYS.items():
-            if any(k in txt for k in keys):
-                markers.append((w["top"], kind))  # y position
-                break
-    markers.sort(key=lambda t: t[0])
-    return markers
-
-
-def _page_section_bands(words: list[dict]) -> list[tuple[float, float, str]]:
-    """Return vertical bands [(y_top, y_bottom, kind)] for lap/shallow/dive across the page.
-
-    Strategy: find y-centers of any section header tokens anywhere on the page; sort by y and
-    convert to bands by midpoints. If <2 markers found, return [] (no page bands).
-    """
-    hits: list[tuple[float, str]] = []
-    for w in words:
-        t = (w.get("text") or "").strip().lower()
-        for kind, phrases in SECTION_KEYS.items():
-            if any(p in t for p in phrases):
-                ymid = (w["top"] + w.get("bottom", w["top"])) / 2.0
-                hits.append((ymid, kind))
-                break
-    if not hits:
-        return []
-
-    # take the median y per kind to reduce noise
-    from statistics import median
-
-    per_kind: dict[str, list[float]] = {}
-    for y, k in hits:
-        per_kind.setdefault(k, []).append(y)
-    centers = [(median(ys), k) for k, ys in per_kind.items()]
-    if len(centers) < 2:
-        return []
-
-    centers.sort(key=lambda x: x[0])  # by y
-    edges = [(centers[i][0] + centers[i + 1][0]) / 2.0 for i in range(len(centers) - 1)]
-
-    bands: list[tuple[float, float, str]] = []
-    for i, (y, kind) in enumerate(centers):
-        top = -1e9 if i == 0 else edges[i - 1]
-        bot = 1e9 if i == len(centers) - 1 else edges[i]
-        bands.append((top, bot, kind))
-    return bands
-
-
-def _assign_kind(
-    row: list[dict],
-    bands: list[tuple[float, float, str]] | None,
-    col_markers: list[tuple[float, str]] | None,
-    default: str = "lap",
-) -> str:
-    """Prefer page-level bands; fall back to column markers; else default."""
-    if not row:
-        return default
-    y = sum(w["top"] for w in row) / len(row)
-
-    if bands:
-        for top, bot, kind in bands:
-            if top <= y <= bot:
-                return kind
-
-    if col_markers:
-        above = [m for m in col_markers if m[0] <= y + 0.01]
-        if above:
-            return above[-1][1]
-
-    return default
-
-
-def extract_blocks_for_day(
-    day_words: list[dict],
-    local_date: datetime,
-    page_bands: list[tuple[float, float, str]] | None,
-) -> Iterable[Block]:
-    """Yield Blocks for the day.
-
-    Rule of thumb:
-    - If a time range exists and a lane count exists to the RIGHT → this is a LAP row.
-    - Else classify via page-bands/column markers → SHALLOW or DIVE (label='open').
-    - Skip LAP rows with no counts.
+def parse_time_range(text: str) -> tuple[int, int, int, int] | None:
+    """Parse time range from text like '7am - 9am', '7:30am-9pm', etc.
+    
+    Returns (start_hour, start_min, end_hour, end_min) or None if not found.
     """
     time_re = re.compile(
-        r"(?P<s>\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))\s*[-–]\s*(?P<e>\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))",
+        r"(\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))\s*[-–]\s*(\d{1,2}(?::\d{2})?\s*(?:a|p|am|pm))",
         re.IGNORECASE,
     )
-    lanes_right_re = re.compile(
-        r"(?<!\d)(?P<n1>\d{1,2})(?:\s*[–-]\s*(?P<n2>\d{1,2}))?(?:\s*lanes?)?(?!\d)",
-        re.IGNORECASE,
-    )
-
-    col_markers = _section_markers(day_words)
-    for row in _rows_from_words(day_words, tol=ROW_TOL):
-        row_text = " ".join((w.get("text") or "") for w in row)
-        tm = time_re.search(row_text)
-        if not tm:
-            continue
-
-        # First, look for lane counts to the RIGHT of the time.
-        post = row_text[tm.end():]
-        m2 = lanes_right_re.search(post)
-
-        sh, sm = time_token_to_24h(tm.group("s"))
-        eh, em = time_token_to_24h(tm.group("e"))
-        st_utc = to_utc_local_eastern(local_date, sh, sm)
-        en_utc = to_utc_local_eastern(local_date, eh, em)
-        if en_utc <= st_utc:
-            en_utc += timedelta(days=1)
-
-        if m2:
-            # Ground truth: if counts exist, this *is* a Lap row.
-            n1 = int(m2.group("n1"))
-            n2 = m2.group("n2")
-            label = f"{n1}–{int(n2)}" if n2 else f"{n1}"
-            yield Block(
-                start=st_utc, end=en_utc, kind="lap", label=label,
-                source_url="", page=0, day="", row_text=row_text
-            )
-            continue
-
-        # No counts → classify via bands/markers.
-        kind = _assign_kind(row, page_bands, col_markers, default="lap")
-        if kind == "lap":
-            # Lap with no counts → skip (keeps lap feed honest).
-            continue
-
-        yield Block(
-            start=st_utc, end=en_utc, kind=kind, label="open",
-            source_url="", page=0, day="", row_text=row_text
-        )
+    
+    m = time_re.search(text)
+    if not m:
+        return None
+    
+    try:
+        sh, sm = time_token_to_24h(m.group(1))
+        eh, em = time_token_to_24h(m.group(2))
+        return sh, sm, eh, em
+    except ValueError:
+        return None
 
 
-def parse_pdf(url: str) -> tuple[list[Block], dict]:
-    """Download and parse the PDF into blocks; collect debug info for inspection."""
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
-    now_utc = datetime.now(timezone.utc)
+def parse_csv_schedule(csv_text: str, now_utc: datetime) -> tuple[list[Block], dict]:
+    """Parse the CSV schedule and extract blocks for each day."""
     blocks: list[Block] = []
-    debug: dict = {"pdf": url, "pages": []}
-
-    with pdfplumber.open(io.BytesIO(r.content)) as pdf:
-        for page_index, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text() or ""
-            header = next((ln for ln in text.splitlines() if "Pool Schedule" in ln), "")
-            span = month_span_to_dates(header, now_utc)
-            week_start = span[0] if span else now_utc
-            while week_start.weekday() != 0:
-                week_start -= timedelta(days=1)
-
-            words = page.extract_words(keep_blank_chars=False, use_text_flow=True)
-            columns, dbg_cols = group_by_day_columns(words)
-            page_bands = _page_section_bands(words)
-
-            page_dbg = {
-                "page": page_index,
-                "header": header,
-                "week_start_utc": week_start.isoformat(),
-                "column_mode": dbg_cols.get("mode"),
-                "bounds": dbg_cols.get("bounds"),
-                "headers_raw": dbg_cols.get("headers_raw"),
-                "page_bands": page_bands,
-                "days": {},
+    debug: dict = {"source": SHEETS_URL, "rows": []}
+    
+    lines = csv_text.strip().split('\n')
+    reader = csv.reader(lines)
+    rows = list(reader)
+    
+    if not rows:
+        return blocks, debug
+    
+    # Try to find week range from first few rows
+    week_start = now_utc
+    for i in range(min(5, len(rows))):
+        header_text = ' '.join(rows[i])
+        span = parse_week_header(header_text, now_utc)
+        if span:
+            week_start = span[0]
+            break
+    
+    # Ensure week_start is a Monday
+    while week_start.weekday() != 0:
+        week_start -= timedelta(days=1)
+    
+    debug["week_start_utc"] = week_start.isoformat()
+    
+    # Find header row with day names
+    day_indices = {}
+    header_row_idx = -1
+    
+    for i, row in enumerate(rows):
+        for j, cell in enumerate(row):
+            cell_lower = cell.strip().lower()
+            # Map common day abbreviations to full names
+            day_map = {
+                "monday": "Monday", "mon": "Monday",
+                "tuesday": "Tuesday", "tue": "Tuesday", "tues": "Tuesday",
+                "wednesday": "Wednesday", "wed": "Wednesday",
+                "thursday": "Thursday", "thu": "Thursday", "thur": "Thursday",
+                "friday": "Friday", "fri": "Friday",
+                "saturday": "Saturday", "sat": "Saturday",
+                "sunday": "Sunday", "sun": "Sunday",
             }
-
-            for offset, day in enumerate(DAYS):
-                local_date = week_start + timedelta(days=offset)
-                day_words = columns.get(day, [])
-                rows_txt = [" ".join((w.get("text") or "") for w in row) for row in _rows_from_words(day_words)]
-                page_dbg["days"][day] = {"row_count": len(rows_txt), "rows": rows_txt, "matches": []}
-
-                for blk in extract_blocks_for_day(day_words, local_date, page_bands):
-                    # fill metadata
-                    blk = Block(
-                        start=blk.start,
-                        end=blk.end,
-                        kind=blk.kind,
-                        label=blk.label,
-                        source_url=url,
-                        page=page_index,
-                        day=day,
-                        row_text=blk.row_text,
-                    )
-                    blocks.append(blk)
-                    page_dbg["days"][day]["matches"].append(
-                        {
-                            "start": blk.start.isoformat(),
-                            "end": blk.end.isoformat(),
-                            "kind": blk.kind,
-                            "label": blk.label,
-                            "row_text": blk.row_text,
-                        }
-                    )
-
-            debug["pages"].append(page_dbg)
-
+            if cell_lower in day_map:
+                day_name = day_map[cell_lower]
+                if day_name not in day_indices:
+                    day_indices[day_name] = j
+                    header_row_idx = i
+    
+    debug["day_indices"] = day_indices
+    debug["header_row_idx"] = header_row_idx
+    
+    if not day_indices or header_row_idx < 0:
+        # No header row found, try to infer structure
+        # Assume columns are: Time, Mon, Tue, Wed, Thu, Fri, Sat, Sun
+        if len(rows) > 0 and len(rows[0]) >= 8:
+            day_indices = {day: i+1 for i, day in enumerate(DAYS)}
+            header_row_idx = 0
+    
+    # Parse data rows after header
+    for i in range(header_row_idx + 1, len(rows)):
+        row = rows[i]
+        row_text = ' '.join(row)
+        
+        # Skip empty rows
+        if not row_text.strip():
+            continue
+        
+        debug["rows"].append({"row_num": i, "content": row, "row_text": row_text})
+        
+        # Extract time range from the row
+        time_info = parse_time_range(row_text)
+        if not time_info:
+            continue
+        
+        sh, sm, eh, em = time_info
+        
+        # Process each day column
+        for day_name, col_idx in day_indices.items():
+            if col_idx >= len(row):
+                continue
+            
+            cell_text = row[col_idx].strip()
+            if not cell_text:
+                continue
+            
+            # Calculate date for this day
+            day_offset = DAYS.index(day_name)
+            local_date = week_start + timedelta(days=day_offset)
+            
+            # Convert times to UTC
+            st_utc = to_utc_local_eastern(local_date, sh, sm)
+            en_utc = to_utc_local_eastern(local_date, eh, em)
+            if en_utc <= st_utc:
+                en_utc += timedelta(days=1)
+            
+            # Classify the kind of pool
+            kind = classify_kind(cell_text)
+            
+            # Extract label (lane count for lap, "open" for others)
+            if kind == "lap":
+                label = extract_lane_count(cell_text)
+                # Skip lap entries with no lane count
+                if label == "open":
+                    continue
+            else:
+                label = "open"
+            
+            block = Block(
+                start=st_utc,
+                end=en_utc,
+                kind=kind,
+                label=label,
+                source_url=SHEETS_URL,
+                day=day_name,
+                row_text=row_text,
+            )
+            blocks.append(block)
+    
     return blocks, debug
 
 
@@ -472,7 +343,7 @@ def make_calendar(blocks: list[Block], kind: Kind | None, calname: str) -> Calen
         else:
             ev.add("summary", "Dive well: open")
         ev.add("location", "Evelyn Kirrane Aquatics Center, 60 Tappan St, Brookline, MA 02446")
-        ev.add("description", f"{b.day} — {b.row_text}\nSource: {b.source_url} (page {b.page})")
+        ev.add("description", f"{b.day} — {b.row_text}\nSource: {b.source_url}")
         uid_raw = f"{b.start.isoformat()}|{b.end.isoformat()}|{b.kind}|{b.label}"
         ev.add("uid", f"ekac-{hashlib.sha1(uid_raw.encode('utf-8')).hexdigest()}@bhs-pool-calendar")
         cal.add_component(ev)
@@ -497,35 +368,26 @@ def _write_debug(debug: dict, blocks: list[Block]) -> None:
         "code{background:#f2f2f2;padding:1px 3px;border-radius:3px}"
         ".ok{color:#0a0}.warn{color:#b80}.bad{color:#b00}</style></head><body>"
     )
-    lines.append(f"<h2>PDF: <code>{debug.get('pdf')}</code></h2>")
+    lines.append(f"<h2>Source: <code>{debug.get('source')}</code></h2>")
     lines.append(f"<p>Total parsed events: <b>{len(blocks)}</b></p>")
     kind_counts = {"lap": 0, "shallow": 0, "dive": 0}
     for b in blocks:
         kind_counts[b.kind] += 1
     lines.append(f"<p>By kind: {kind_counts}</p>")
-    for page in debug.get("pages", []):
-        lines.append(f"<h3>Page {page['page']}</h3>")
-        lines.append(f"<p>Header: <code>{page['header']}</code></p>")
-        lines.append(
-            f"<p>Week start (UTC): <code>{page['week_start_utc']}</code> | "
-            f"Columns mode: <code>{page['column_mode']}</code></p>"
-        )
-        lines.append("<details><summary>Column bounds & headers</summary><pre>")
-        lines.append(json.dumps({"bounds": page.get("bounds"), "headers_raw": page.get("headers_raw")}, indent=2))
-        lines.append("</pre></details>")
-        lines.append("<details><summary>Page section bands</summary><pre>")
-        lines.append(json.dumps({"page_bands": page.get("page_bands")}, indent=2))
-        lines.append("</pre></details>")
-        for day in DAYS:
-            d = page["days"].get(day, {})
-            matches = d.get("matches", [])
-            cls = "ok" if matches else "bad"
-            lines.append(f"<details open><summary class='{cls}'>{day}: {len(matches)} matches</summary>")
-            rows = d.get("rows", [])
-            lines.append("<pre>Rows:\n" + ("\n".join(rows) if rows else "(none)") + "</pre>")
-            if matches:
-                lines.append("<pre>Matches:\n" + json.dumps(matches, indent=2) + "</pre>")
-            lines.append("</details>")
+    lines.append(f"<p>Week start (UTC): <code>{debug.get('week_start_utc')}</code></p>")
+    lines.append(f"<p>Day indices: <code>{debug.get('day_indices')}</code></p>")
+    lines.append(f"<p>Header row: <code>{debug.get('header_row_idx')}</code></p>")
+    
+    lines.append("<h3>Parsed Rows</h3>")
+    for row_info in debug.get("rows", []):
+        lines.append(f"<details><summary>Row {row_info['row_num']}</summary>")
+        lines.append(f"<pre>{row_info['row_text']}</pre>")
+        lines.append("</details>")
+    
+    lines.append("<h3>Generated Events</h3>")
+    for b in blocks:
+        lines.append(f"<p><b>{b.day}</b> - {b.kind}: {b.start.isoformat()} to {b.end.isoformat()} - {b.label}</p>")
+    
     lines.append("</body></html>")
     with open("public/debug.html", "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -552,7 +414,7 @@ def _write_index() -> None:
 <div class="card notice">
   <h2>About this project</h2>
   <p>
-    Unofficial, community-built calendars generated from the weekly Pool Schedule PDF published by the
+    Unofficial, community-built calendars generated from the weekly Pool Schedule published by the
     Town of Brookline Recreation Department. For the official schedule, see
     <a href="{AQUATICS_URL}">the Aquatics Center page</a>.
   </p>
@@ -568,7 +430,7 @@ def _write_index() -> None:
 
 <div class="card">
   <h2>Lap Lanes</h2>
-  <p>Shows lane availability (e.g., “Lap lanes: 4–5 open”).</p>
+  <p>Shows lane availability (e.g., "Lap lanes: 4–5 open").</p>
   <p><a href="ekac-lap.ics"><b>HTTPS</b></a> &nbsp;|&nbsp;
      <a href="webcal://{owner}.github.io/bhs-pool-calendar/ekac-lap.ics"><b>webcal://</b></a></p>
 </div>
@@ -600,8 +462,11 @@ def _write_index() -> None:
 
 
 def main() -> int:
-    pdf_url = discover_latest_pdf()
-    blocks, debug = parse_pdf(pdf_url)
+    now_utc = datetime.now(timezone.utc)
+    
+    # Fetch and parse the Google Sheet
+    csv_text = fetch_sheet_csv()
+    blocks, debug = parse_csv_schedule(csv_text, now_utc)
 
     # Write calendars
     os.makedirs("public", exist_ok=True)
@@ -620,8 +485,8 @@ def main() -> int:
         _write_debug(debug, blocks)
 
     print(
-        "Wrote feeds: ekac-lap.ics, ekac-shallow.ics, ekac-dive.ics, ekac.ics "
-        f"from {debug.get('pdf')}"
+        f"Wrote feeds: ekac-lap.ics, ekac-shallow.ics, ekac-dive.ics, ekac.ics "
+        f"from Google Sheets ({len(blocks)} events)"
     )
     return 0
 
@@ -631,4 +496,6 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         raise
