@@ -421,23 +421,32 @@ def _write_debug(debug: dict, blocks: list[Block]) -> None:
         "code{background:#f2f2f2;padding:1px 3px;border-radius:3px}"
         ".ok{color:#0a0}.warn{color:#b80}.bad{color:#b00}</style></head><body>"
     )
-    lines.append(f"<h2>Source: <code>{debug.get('source')}</code></h2>")
+    lines.append("<h2>Multi-Sheet Debug</h2>")
     lines.append(f"<p>Total parsed events: <b>{len(blocks)}</b></p>")
     kind_counts = {"lap": 0, "shallow": 0, "dive": 0}
     for b in blocks:
         kind_counts[b.kind] += 1
     lines.append(f"<p>By kind: {kind_counts}</p>")
-    lines.append(f"<p>Week start (UTC): <code>{debug.get('week_start_utc')}</code></p>")
-    lines.append(f"<p>Day indices: <code>{debug.get('day_indices')}</code></p>")
-    lines.append(f"<p>Header row: <code>{debug.get('header_row_idx')}</code></p>")
     
-    lines.append("<h3>Parsed Rows</h3>")
-    for row_info in debug.get("rows", []):
-        lines.append(f"<details><summary>Row {row_info['row_num']}</summary>")
-        lines.append(f"<pre>{row_info['row_text']}</pre>")
-        lines.append("</details>")
+    # Display info for each sheet
+    for i, sheet_info in enumerate(debug.get("sheets", [])):
+        gid = sheet_info.get("gid", "unknown")
+        blocks_count = sheet_info.get("blocks_count", 0)
+        sheet_debug = sheet_info.get("debug", {})
+        
+        lines.append(f"<h3>Sheet {i+1}: GID {gid} ({blocks_count} events)</h3>")
+        lines.append(f"<p>Source: <code>{sheet_debug.get('source', 'N/A')}</code></p>")
+        lines.append(f"<p>Week start (UTC): <code>{sheet_debug.get('week_start_utc', 'N/A')}</code></p>")
+        lines.append(f"<p>Day indices: <code>{sheet_debug.get('day_indices', {})}</code></p>")
+        lines.append(f"<p>Header row: <code>{sheet_debug.get('header_row_idx', 'N/A')}</code></p>")
+        
+        lines.append(f"<h4>Parsed Rows (Sheet {i+1})</h4>")
+        for row_info in sheet_debug.get("rows", []):
+            lines.append(f"<details><summary>Row {row_info['row_num']}</summary>")
+            lines.append(f"<pre>{row_info['row_text']}</pre>")
+            lines.append("</details>")
     
-    lines.append("<h3>Generated Events</h3>")
+    lines.append("<h3>All Generated Events</h3>")
     for b in blocks:
         lines.append(f"<p><b>{b.day}</b> - {b.kind}: {b.start.isoformat()} to {b.end.isoformat()} - {b.label}</p>")
     
