@@ -1,14 +1,15 @@
 # bhs-pool-calendar
 
 Generates iCal feeds for the Evelyn Kirrane Aquatics Center (Brookline High School) pool schedule by parsing the
-weekly PDF and publishing calendars via GitHub Actions + Pages.
+weekly Google Sheets document and publishing calendars via GitHub Actions + Pages.
 
 ## About & Disclaimer
 
 > **Unofficial project.** This repository is maintained by the community and is not affiliated with the Town of
-> Brookline. The feeds are generated automatically by scraping the public PDF. **No guarantees**: parsing can be wrong,
+> Brookline. The feeds are generated automatically by parsing the public Google Sheets document. **No guarantees**: parsing can be wrong,
 > stale, or incomplete. **Always confirm** with the facility’s official schedule:
 > https://www.brooklinerec.com/150/Aquatics-Center  
+> Schedule source: https://docs.google.com/spreadsheets/d/1eYOnElx9lFYqS7XgjnhZrjDY5xWY_96RWftZ7TK1acU/htmlview  
 > This is just a fun project using ChatGPT 5.
 
 ---
@@ -28,10 +29,12 @@ Direct feeds:
 
 ## How it works
 
-- Finds the latest “Pool Schedule” PDF on the Aquatics page (with a stable fallback).
-- Parses weekday columns using page geometry; clusters text into rows to extract time ranges.
+- Fetches the Pool Schedule from a public Google Sheets document as CSV.
+- **Automatically discovers and processes all sheets/tabs** in the document (each tab typically represents a different week).
+- Parses the CSV to extract schedule information for each day of the week.
 - Builds four iCal feeds (Lap / Shallow / Dive / All) and publishes them to GitHub Pages on a daily cron
   and on manual runs.
+- When the pool administration adds new tabs for future weeks, they are automatically included.
 
 ## Development
 
@@ -45,13 +48,11 @@ open public/index.html
 Environment toggles (used by the workflow):
 
 - `DEBUG=1` → publish debug.html / debug.json for troubleshooting
-- `ROW_TOL` (default 3.5) → row clustering tolerance (pixels)
-- `COL_GUTTER_PX` (default 16) → left-bias gutter to prevent Sat/Sun column bleed
-- `COL_LEFT_BIAS_PX` (default 6) → tie-break toward the left column
+- `SHEETS_URL` → override the default Google Sheets URL
 
 ### Contributing
 
-Issues and PRs are welcome—especially if the PDF layout changes and parsing needs tweaks.
+Issues and PRs are welcome—especially if the Google Sheets layout changes and parsing needs tweaks.
 If you report a parsing problem, please include:
 	•	Date/day and the affected row text from debug.html
 	•	What the expected events should be
