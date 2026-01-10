@@ -63,12 +63,66 @@ SECTION_KEYS = {
 }
 
 
-def fetch_sheet_csv() -> str:
-    """Fetch the Google Sheet as CSV text."""
-    url = os.environ.get("SHEETS_URL", SHEETS_URL)
+def discover_sheet_gids() -> list[str]:
+    """Discover all sheet GIDs in the Google Sheets document by fetching the HTML view."""
+    html_url = f"https://docs.google.com/spreadsheets/d/{SHEETS_ID}/htmlview"
+    try:
+        resp = requests.get(html_url, timeout=30)
+        resp.raise_for_status()
+        # Extract all unique GIDs from the HTML
+        gids = re.findall(r'gid=(\d+)', resp.text)
+        # Return unique GIDs, preserving order
+        seen = set()
+        result = []
+        for gid in gids:
+            if gid not in seen:
+                seen.add(gid)
+                result.append(gid)
+        return result
+    except Exception as e:
+        print(f"Warning: Could not discover sheet GIDs: {e}", file=sys.stderr)
+        return []
+
+
+def fetch_sheet_csv(gid: str | None = None) -> str:
+    """Fetch a Google Sheet as CSV text.
+    
+    Args:
+        gid: Optional sheet GID to fetch. If None, fetches the default sheet.
+    """
+    if gid:
+        url = f"https://docs.google.com/spreadsheets/d/{SHEETS_ID}/export?format=csv&gid={gid}"
+    else:
+        url = os.environ.get("SHEETS_URL", SHEETS_URL)
+    
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
     return resp.text
+
+
+def fetch_all_sheets() -> list[tuple[str, str]]:
+    """Fetch all sheets from the Google Sheets document.
+    
+    Returns:
+        List of (gid, csv_text) tuples, one for each sheet.
+    """
+    gids = discover_sheet_gids()
+    
+    if not gids:
+        # Fallback to fetching the default sheet
+        print("No GIDs found, falling back to default sheet", file=sys.stderr)
+        return [("default", fetch_sheet_csv())]
+    
+    sheets = []
+    for gid in gids:
+        try:
+            csv_text = fetch_sheet_csv(gid)
+            sheets.append((gid, csv_text))
+            print(f"Fetched sheet GID {gid}", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: Could not fetch sheet GID {gid}: {e}", file=sys.stderr)
+    
+    return sheets
 
 
 def parse_week_header(header_text: str, now_utc: datetime) -> tuple[datetime, datetime] | None:
@@ -463,9 +517,32 @@ def _write_index() -> None:
 def main() -> int:
     now_utc = datetime.now(timezone.utc)
     
-    # Fetch and parse the Google Sheet
-    csv_text = fetch_sheet_csv()
-    blocks, debug = parse_csv_schedule(csv_text, now_utc)
+    # Fetch and parse all sheets from the Google Sheets document
+    all_sheets = fetch_all_sheets()
+    all_blocks = []
+    all_debug = {"sheets": []}
+    
+    for gid, csv_text in all_sheets:
+        blocks, debug = parse_csv_schedule(csv_text, now_utc)
+        all_blocks.extend(blocks)
+        all_debug["sheets"].append({
+            "gid": gid,
+            "blocks_count": len(blocks),
+            "debug": debug
+        })
+        print(f"Parsed sheet GID {gid}: {len(blocks)} events", file=sys.stderr)
+    
+    # Remove duplicate blocks (same start, end, kind, label)
+    # This can happen if there are overlapping schedules
+    seen = set()
+    unique_blocks = []
+    for block in all_blocks:
+        key = (block.start, block.end, block.kind, block.label)
+        if key not in seen:
+            seen.add(key)
+            unique_blocks.append(block)
+    
+    print(f"Total events after deduplication: {len(unique_blocks)}", file=sys.stderr)
 
     # Write calendars
     os.makedirs("public", exist_ok=True)
@@ -475,17 +552,17 @@ def main() -> int:
         ("dive", "ekac-dive.ics", "Brookline EKAC — Dive Well"),
         (None, "ekac.ics", "Brookline EKAC — All Pools"),
     ]:
-        cal = make_calendar(blocks, kind if isinstance(kind, str) else None, title)  # type: ignore[arg-type]
+        cal = make_calendar(unique_blocks, kind if isinstance(kind, str) else None, title)  # type: ignore[arg-type]
         with open(f"public/{fname}", "wb") as f:
             f.write(cal.to_ical())
 
     _write_index()
     if DEBUG:
-        _write_debug(debug, blocks)
+        _write_debug(all_debug, unique_blocks)
 
     print(
         f"Wrote feeds: ekac-lap.ics, ekac-shallow.ics, ekac-dive.ics, ekac.ics "
-        f"from Google Sheets ({len(blocks)} events)"
+        f"from Google Sheets ({len(unique_blocks)} events)"
     )
     return 0
 

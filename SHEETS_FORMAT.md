@@ -2,6 +2,10 @@
 
 The pool schedule parser expects a Google Sheets document with the following structure:
 
+## Multiple Sheets Support
+
+The parser automatically discovers and processes **all sheets/tabs** in the Google Sheets document. Each sheet typically represents a different week of pool schedules. When the pool administration adds new tabs for future weeks, they will be automatically included in the generated calendars.
+
 ## Expected Format
 
 ```csv

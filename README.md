@@ -30,9 +30,11 @@ Direct feeds:
 ## How it works
 
 - Fetches the Pool Schedule from a public Google Sheets document as CSV.
+- **Automatically discovers and processes all sheets/tabs** in the document (each tab typically represents a different week).
 - Parses the CSV to extract schedule information for each day of the week.
 - Builds four iCal feeds (Lap / Shallow / Dive / All) and publishes them to GitHub Pages on a daily cron
   and on manual runs.
+- When the pool administration adds new tabs for future weeks, they are automatically included.
 
 ## Development
 
@@ -50,7 +52,7 @@ Environment toggles (used by the workflow):
 
 ### Contributing
 
-Issues and PRs are welcome—especially if the PDF layout changes and parsing needs tweaks.
+Issues and PRs are welcome—especially if the Google Sheets layout changes and parsing needs tweaks.
 If you report a parsing problem, please include:
 	•	Date/day and the affected row text from debug.html
 	•	What the expected events should be
