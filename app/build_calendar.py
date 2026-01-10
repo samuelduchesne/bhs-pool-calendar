@@ -69,7 +69,8 @@ def discover_sheet_gids() -> list[str]:
     try:
         resp = requests.get(html_url, timeout=30)
         resp.raise_for_status()
-        # Extract all unique GIDs from the HTML
+        # Extract all unique GIDs from the HTML using regex
+        # Simple regex is sufficient here as we're only looking for numeric GIDs
         gids = re.findall(r'gid=(\d+)', resp.text)
         # Return unique GIDs, preserving order
         seen = set()
@@ -79,7 +80,7 @@ def discover_sheet_gids() -> list[str]:
                 seen.add(gid)
                 result.append(gid)
         return result
-    except Exception as e:
+    except requests.RequestException as e:
         print(f"Warning: Could not discover sheet GIDs: {e}", file=sys.stderr)
         return []
 
@@ -119,7 +120,7 @@ def fetch_all_sheets() -> list[tuple[str, str]]:
             csv_text = fetch_sheet_csv(gid)
             sheets.append((gid, csv_text))
             print(f"Fetched sheet GID {gid}", file=sys.stderr)
-        except Exception as e:
+        except requests.RequestException as e:
             print(f"Warning: Could not fetch sheet GID {gid}: {e}", file=sys.stderr)
     
     return sheets
