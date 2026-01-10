@@ -79,47 +79,45 @@ def parse_week_header(header_text: str, now_utc: datetime) -> tuple[datetime, da
     - "Week of August 4-10, 2024"
     - "August 4-10"
     """
-    # Try different patterns
-    patterns = [
-        r"([A-Za-z]+)\s+(\d{1,2})\s*[-–]\s*(\d{1,2})(?:,?\s*(\d{4}))?",
-        r"(?:Pool Schedule\s*(?:for)?|Week of)\s+([A-Za-z]+)\s+(\d{1,2})\s*[-–]\s*(\d{1,2})(?:,?\s*(\d{4}))?",
-    ]
+    # Pattern that captures: (month, day1, day2, year?)
+    pattern = r"([A-Za-z]+)\s+(\d{1,2})\s*[-–]\s*(\d{1,2})(?:,?\s*(\d{4}))?"
     
-    for pattern in patterns:
-        m = re.search(pattern, header_text, re.IGNORECASE)
-        if m:
-            groups = m.groups()
-            month = groups[0] if groups[0] else groups[1]
-            d1 = int(groups[1] if groups[0] else groups[2])
-            d2 = int(groups[2] if groups[0] else groups[3])
-            year = int(groups[3]) if len(groups) > 3 and groups[3] else None
-            
-            # If year not specified, find closest year
-            if year is None:
-                candidates = []
-                for y in (now_utc.year - 1, now_utc.year, now_utc.year + 1):
-                    try:
-                        s = dtparse.parse(f"{month} {d1}, {y}").date()
-                        e = dtparse.parse(f"{month} {d2}, {y}").date()
-                        candidates.append((s, e, abs((now_utc.date() - s).days)))
-                    except:
-                        continue
-                if candidates:
-                    s, e, _ = min(candidates, key=lambda t: t[2])
-                    return (
-                        datetime(s.year, s.month, s.day, tzinfo=timezone.utc),
-                        datetime(e.year, e.month, e.day, tzinfo=timezone.utc),
-                    )
-            else:
-                try:
-                    s = dtparse.parse(f"{month} {d1}, {year}").date()
-                    e = dtparse.parse(f"{month} {d2}, {year}").date()
-                    return (
-                        datetime(s.year, s.month, s.day, tzinfo=timezone.utc),
-                        datetime(e.year, e.month, e.day, tzinfo=timezone.utc),
-                    )
-                except:
-                    pass
+    m = re.search(pattern, header_text, re.IGNORECASE)
+    if not m:
+        return None
+    
+    month_str = m.group(1)
+    d1 = int(m.group(2))
+    d2 = int(m.group(3))
+    year_str = m.group(4)
+    
+    # If year not specified, find closest year
+    if year_str is None:
+        candidates = []
+        for y in (now_utc.year - 1, now_utc.year, now_utc.year + 1):
+            try:
+                s = dtparse.parse(f"{month_str} {d1}, {y}").date()
+                e = dtparse.parse(f"{month_str} {d2}, {y}").date()
+                candidates.append((s, e, abs((now_utc.date() - s).days)))
+            except (ValueError, dtparse.ParserError):
+                continue
+        if candidates:
+            s, e, _ = min(candidates, key=lambda t: t[2])
+            return (
+                datetime(s.year, s.month, s.day, tzinfo=timezone.utc),
+                datetime(e.year, e.month, e.day, tzinfo=timezone.utc),
+            )
+    else:
+        try:
+            year = int(year_str)
+            s = dtparse.parse(f"{month_str} {d1}, {year}").date()
+            e = dtparse.parse(f"{month_str} {d2}, {year}").date()
+            return (
+                datetime(s.year, s.month, s.day, tzinfo=timezone.utc),
+                datetime(e.year, e.month, e.day, tzinfo=timezone.utc),
+            )
+        except (ValueError, dtparse.ParserError):
+            pass
     
     return None
 
@@ -154,10 +152,11 @@ def classify_kind(text: str) -> Kind:
     text_lower = text.lower()
     
     # Check for specific markers
-    for kind, keys in SECTION_KEYS.items():
+    for kind_str, keys in SECTION_KEYS.items():
         for key in keys:
             if key in text_lower:
-                return kind  # type: ignore
+                # Cast to Kind type since we know kind_str is one of "lap", "shallow", or "dive"
+                return kind_str  # type: ignore[return-value]
     
     # Default to lap if not specified
     return "lap"
